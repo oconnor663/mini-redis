@@ -75,7 +75,7 @@ impl Get {
         debug!(?response);
 
         // Write the response back to the client
-        dst.write_frame(&response).await?;
+        dst.writer.write_frame(&response).await?;
 
         Ok(())
     }

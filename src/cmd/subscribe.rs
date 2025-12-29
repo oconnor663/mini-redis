@@ -130,9 +130,9 @@ impl Subscribe {
             select! {
                 // Receive messages from subscribed channels
                 Some((channel_name, msg)) = subscriptions.next() => {
-                    dst.write_frame(&make_message_frame(channel_name, msg)).await?;
+                    dst.writer.write_frame(&make_message_frame(channel_name, msg)).await?;
                 }
-                res = dst.read_frame() => {
+                res = dst.reader.read_frame() => {
                     let frame = match res? {
                         Some(frame) => frame,
                         // This happens if the remote client has disconnected.
@@ -192,7 +192,7 @@ async fn subscribe_to_channel(
 
     // Respond with the successful subscription
     let response = make_subscribe_frame(channel_name, subscriptions.len());
-    dst.write_frame(&response).await?;
+    dst.writer.write_frame(&response).await?;
 
     Ok(())
 }
@@ -234,7 +234,7 @@ async fn handle_command(
                 subscriptions.remove(&channel_name);
 
                 let response = make_unsubscribe_frame(channel_name, subscriptions.len());
-                dst.write_frame(&response).await?;
+                dst.writer.write_frame(&response).await?;
             }
         }
         command => {

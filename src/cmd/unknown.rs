@@ -31,7 +31,7 @@ impl Unknown {
 
         debug!(?response);
 
-        dst.write_frame(&response).await?;
+        dst.writer.write_frame(&response).await?;
         Ok(())
     }
 }

@@ -113,7 +113,7 @@ impl Client {
     pub async fn ping(&mut self, msg: Option<Bytes>) -> crate::Result<Bytes> {
         let frame = Ping::new(msg).into_frame();
         debug!(request = ?frame);
-        self.connection.write_frame(&frame).await?;
+        self.connection.writer.write_frame(&frame).await?;
 
         match self.read_response().await? {
             Frame::Simple(value) => Ok(value.into()),
@@ -150,7 +150,7 @@ impl Client {
 
         // Write the frame to the socket. This writes the full frame to the
         // socket, waiting if necessary.
-        self.connection.write_frame(&frame).await?;
+        self.connection.writer.write_frame(&frame).await?;
 
         // Wait for the response from the server
         //
@@ -260,7 +260,7 @@ impl Client {
 
         // Write the frame to the socket. This writes the full frame to the
         // socket, waiting if necessary.
-        self.connection.write_frame(&frame).await?;
+        self.connection.writer.write_frame(&frame).await?;
 
         // Wait for the response from the server. On success, the server
         // responds simply with `OK`. Any other response indicates an error.
@@ -299,7 +299,7 @@ impl Client {
         debug!(request = ?frame);
 
         // Write the frame to the socket
-        self.connection.write_frame(&frame).await?;
+        self.connection.writer.write_frame(&frame).await?;
 
         // Read the response
         match self.read_response().await? {
@@ -337,7 +337,7 @@ impl Client {
         debug!(request = ?frame);
 
         // Write the frame to the socket
-        self.connection.write_frame(&frame).await?;
+        self.connection.writer.write_frame(&frame).await?;
 
         // For each channel being subscribed to, the server responds with a
         // message confirming subscription to that channel.
@@ -372,7 +372,7 @@ impl Client {
     ///
     /// If an `Error` frame is received, it is converted to `Err`.
     async fn read_response(&mut self) -> crate::Result<Frame> {
-        let response = self.connection.read_frame().await?;
+        let response = self.connection.reader.read_frame().await?;
 
         debug!(?response);
 
@@ -403,7 +403,7 @@ impl Subscriber {
     ///
     /// `None` indicates the subscription has been terminated.
     pub async fn next_message(&mut self) -> crate::Result<Option<Message>> {
-        match self.client.connection.read_frame().await? {
+        match self.client.connection.reader.read_frame().await? {
             Some(mframe) => {
                 debug!(?mframe);
 
@@ -463,7 +463,7 @@ impl Subscriber {
         debug!(request = ?frame);
 
         // Write the frame to the socket
-        self.client.connection.write_frame(&frame).await?;
+        self.client.connection.writer.write_frame(&frame).await?;
 
         // if the input channel list is empty, server acknowledges as unsubscribing
         // from all subscribed channels, so we assert that the unsubscribe list received
