@@ -101,7 +101,7 @@ impl Command {
             Set(cmd) => cmd.apply(db, dst).await,
             Subscribe(cmd) => cmd.apply(db, dst, shutdown).await,
             Ping(cmd) => cmd.apply(dst).await,
-            Unknown(cmd) => cmd.apply(dst).await,
+            Unknown(cmd) => cmd.apply(&mut dst.writer).await,
             // `Unsubscribe` cannot be applied. It may only be received from the
             // context of a `Subscribe` command.
             Unsubscribe(_) => Err("`Unsubscribe` is unsupported in this context".into()),

@@ -3,6 +3,7 @@ use crate::frame::{self, Frame};
 use bytes::{Buf, BytesMut};
 use std::io::{self, Cursor};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
 /// Send and receive `Frame` values from a remote peer.
@@ -19,29 +20,48 @@ use tokio::net::TcpStream;
 /// The contents of the write buffer are then written to the socket.
 #[derive(Debug)]
 pub struct Connection {
-    // The `TcpStream`. It is decorated with a `BufWriter`, which provides write
-    // level buffering. The `BufWriter` implementation provided by Tokio is
-    // sufficient for our needs.
-    stream: BufWriter<TcpStream>,
+    pub reader: ConnectionReader,
+    pub writer: ConnectionWriter,
+}
+
+#[derive(Debug)]
+pub struct ConnectionReader {
+    stream: OwnedReadHalf,
 
     // The buffer for reading frames.
     buffer: BytesMut,
+}
+
+#[derive(Debug)]
+pub struct ConnectionWriter {
+    // The `TcpStream`. It is decorated with a `BufWriter`, which provides write
+    // level buffering. The `BufWriter` implementation provided by Tokio is
+    // sufficient for our needs.
+    stream: BufWriter<OwnedWriteHalf>,
 }
 
 impl Connection {
     /// Create a new `Connection`, backed by `socket`. Read and write buffers
     /// are initialized.
     pub fn new(socket: TcpStream) -> Connection {
+        let (read_half, write_half) = socket.into_split();
         Connection {
-            stream: BufWriter::new(socket),
-            // Default to a 4KB read buffer. For the use case of mini redis,
-            // this is fine. However, real applications will want to tune this
-            // value to their specific use case. There is a high likelihood that
-            // a larger read buffer will work better.
-            buffer: BytesMut::with_capacity(4 * 1024),
+            reader: ConnectionReader {
+                stream: read_half,
+                // Default to a 4KB read buffer. For the use case of mini redis,
+                // this is fine. However, real applications will want to tune this
+                // value to their specific use case. There is a high likelihood that
+                // a larger read buffer will work better.
+                buffer: BytesMut::with_capacity(4 * 1024),
+            },
+            writer: ConnectionWriter {
+                stream: BufWriter::new(write_half),
+            },
         }
     }
+}
 
+impl ConnectionReader {
     /// Read a single `Frame` value from the underlying stream.
     ///
     /// The function waits until it has retrieved enough data to parse a frame.
@@ -144,7 +164,9 @@ impl Connection {
             Err(e) => Err(e.into()),
         }
     }
+}
 
+impl ConnectionWriter {
     /// Write a single `Frame` value to the underlying stream.
     ///
     /// The `Frame` value is written to the socket using the various `write_*`
