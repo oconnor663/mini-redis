@@ -1,4 +1,5 @@
-use crate::{Connection, Frame};
+use crate::connection::ConnectionWriter;
+use crate::Frame;
 
 use tracing::{debug, instrument};
 
@@ -26,12 +27,12 @@ impl Unknown {
     ///
     /// This usually means the command is not yet implemented by `mini-redis`.
     #[instrument(skip(self, dst))]
-    pub(crate) async fn apply(self, dst: &mut Connection) -> crate::Result<()> {
+    pub(crate) async fn apply(self, dst: &mut ConnectionWriter) -> crate::Result<()> {
         let response = Frame::Error(format!("ERR unknown command '{}'", self.command_name));
 
         debug!(?response);
 
-        dst.writer.write_frame(&response).await?;
+        dst.write_frame(&response).await?;
         Ok(())
     }
 }

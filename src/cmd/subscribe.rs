@@ -1,11 +1,11 @@
 use crate::cmd::{Parse, ParseError, Unknown};
+use crate::connection::ConnectionWriter;
 use crate::{Command, Connection, Db, Frame, Shutdown};
 
 use bytes::Bytes;
 use std::pin::Pin;
-use tokio::select;
 use tokio::sync::broadcast;
-use tokio_stream::{Stream, StreamExt, StreamMap};
+use tokio_stream::{Stream, StreamMap};
 
 /// Subscribes the client to one or more channels.
 ///
@@ -114,43 +114,66 @@ impl Subscribe {
         // they are received.
         let mut subscriptions = StreamMap::new();
 
-        loop {
-            // `self.channels` is used to track additional channels to subscribe
-            // to. When new `SUBSCRIBE` commands are received during the
-            // execution of `apply`, the new channels are pushed onto this vec.
-            for channel_name in self.channels.drain(..) {
-                subscribe_to_channel(channel_name, &mut subscriptions, db, dst).await?;
+        let reader = &mut dst.reader;
+        let reader_stream = async_stream::stream! {
+            while let Some(frame) = reader.read_frame().await.transpose() {
+                yield frame;
             }
+        };
+        let writer = &mut dst.writer;
 
-            // Wait for one of the following to happen:
-            //
-            // - Receive a message from one of the subscribed channels.
-            // - Receive a subscribe or unsubscribe command from the client.
-            // - A server shutdown signal.
-            select! {
-                // Receive messages from subscribed channels
-                Some((channel_name, msg)) = subscriptions.next() => {
-                    dst.writer.write_frame(&make_message_frame(channel_name, msg)).await?;
-                }
-                res = dst.reader.read_frame() => {
-                    let frame = match res? {
-                        Some(frame) => frame,
-                        // This happens if the remote client has disconnected.
-                        None => return Ok(())
-                    };
+        for channel_name in self.channels.drain(..) {
+            subscribe_to_channel(
+                channel_name.clone(),
+                |messages| {
+                    subscriptions.insert(channel_name, messages);
+                    subscriptions.len()
+                },
+                db,
+                writer,
+            )
+            .await?;
+        }
 
-                    handle_command(
-                        frame,
-                        &mut self.channels,
-                        &mut subscriptions,
-                        dst,
+        join_me_maybe::join!(
+            // TODO: This isn't entirely correct as-is, because if the `StreamMap` is ever empty,
+            // it'll return `Poll::Ready(None)` from `poll_next`, and `join_me_maybe` will
+            // interpret that as end-of-stream and drop it immediately. To be robust to that
+            // situation (you unsubscribe from all channels but then resubscribe to something
+            // later?) we'd need to wrap `StreamMap` in some adapter that never(?) returns
+            // `Poll::Ready(None)`. See this section of the docs:
+            // https://docs.rs/join_me_maybe/0.4.1/join_me_maybe/#mutable-access-to-futures-and-streams
+            subscriptions_canceller: (channel_name, msg) in subscriptions => {
+                writer.write_frame(&make_message_frame(channel_name, msg)).await?;
+            },
+            frame_result in reader_stream => {
+                handle_command(
+                    frame_result?,
+                    &mut self.channels,
+                    subscriptions_canceller,
+                    writer,
+                ).await?;
+                // `self.channels` is used to track additional channels to subscribe
+                // to. When new `SUBSCRIBE` commands are received during the
+                // execution of `apply`, the new channels are pushed onto this vec.
+                for channel_name in self.channels.drain(..) {
+                    subscribe_to_channel(
+                        channel_name.clone(),
+                        |messages| {
+                            subscriptions_canceller.with_mut(|subscriptions| {
+                                let subscriptions = subscriptions.expect("not finished or cancelled");
+                                subscriptions.insert(channel_name, messages);
+                                subscriptions.len()
+                            })
+                        },
+                        db,
+                        writer,
                     ).await?;
                 }
-                _ = shutdown.recv() => {
-                    return Ok(());
-                }
-            };
-        }
+            },
+            _ = shutdown.recv() => return Ok(()),
+        );
+        Ok(())
     }
 
     /// Converts the command into an equivalent `Frame`.
@@ -169,9 +192,9 @@ impl Subscribe {
 
 async fn subscribe_to_channel(
     channel_name: String,
-    subscriptions: &mut StreamMap<String, Messages>,
+    insert_subscription: impl FnOnce(Messages) -> usize,
     db: &Db,
-    dst: &mut Connection,
+    dst: &mut ConnectionWriter,
 ) -> crate::Result<()> {
     let mut rx = db.subscribe(channel_name.clone());
 
@@ -188,11 +211,11 @@ async fn subscribe_to_channel(
     });
 
     // Track subscription in this client's subscription set.
-    subscriptions.insert(channel_name.clone(), rx);
+    let len = insert_subscription(rx);
 
     // Respond with the successful subscription
-    let response = make_subscribe_frame(channel_name, subscriptions.len());
-    dst.writer.write_frame(&response).await?;
+    let response = make_subscribe_frame(channel_name, len);
+    dst.write_frame(&response).await?;
 
     Ok(())
 }
@@ -205,8 +228,8 @@ async fn subscribe_to_channel(
 async fn handle_command(
     frame: Frame,
     subscribe_to: &mut Vec<String>,
-    subscriptions: &mut StreamMap<String, Messages>,
-    dst: &mut Connection,
+    subscriptions_canceller: &join_me_maybe::CancellerMut<'_, StreamMap<String, Messages>>,
+    dst: &mut ConnectionWriter,
 ) -> crate::Result<()> {
     // A command has been received from the client.
     //
@@ -224,17 +247,22 @@ async fn handle_command(
             // vec is populated with the list of channels currently subscribed
             // to.
             if unsubscribe.channels.is_empty() {
-                unsubscribe.channels = subscriptions
-                    .keys()
-                    .map(|channel_name| channel_name.to_string())
-                    .collect();
+                subscriptions_canceller.with_mut(|subscriptions| {
+                    unsubscribe.channels = subscriptions
+                        .expect("not finished or cancelled")
+                        .keys()
+                        .map(|channel_name| channel_name.to_string())
+                        .collect();
+                });
             }
 
             for channel_name in unsubscribe.channels {
-                subscriptions.remove(&channel_name);
-
-                let response = make_unsubscribe_frame(channel_name, subscriptions.len());
-                dst.writer.write_frame(&response).await?;
+                let response = subscriptions_canceller.with_mut(|subscriptions| {
+                    let subscriptions = subscriptions.expect("not finished or cancelled");
+                    subscriptions.remove(&channel_name);
+                    make_unsubscribe_frame(channel_name, subscriptions.len())
+                });
+                dst.write_frame(&response).await?;
             }
         }
         command => {
